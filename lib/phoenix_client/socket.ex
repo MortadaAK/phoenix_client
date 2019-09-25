@@ -151,7 +151,7 @@ defmodule PhoenixClient.Socket do
       ) do
     channels
     |> Map.values()
-    |> Enum.any?(&(&1 == channel_pid))
+    |> Enum.any?(&match?({^channel_pid, _}, &1))
     |> case do
       true ->
         {:reply, :ok, %{state | topics: Map.put(topics, topic, channel_pid)}}
@@ -295,14 +295,14 @@ defmodule PhoenixClient.Socket do
     decoded = Message.decode!(serializer, message, json_library)
     channel_pid = Map.get(topics, decoded.topic)
 
-    cond do
-      is_pid(channel_pid) ->
+    case {Map.get(channels, decoded.topic), channel_pid} do
+      {_, channel_pid} when is_pid(channel_pid) ->
         send(channel_pid, decoded)
 
-      {channel_pid, _} = Map.get(channels, decoded.topic) ->
+      {{channel_pid, _}, _} ->
         send(channel_pid, decoded)
 
-      true ->
+      _ ->
         :noop
     end
   end
