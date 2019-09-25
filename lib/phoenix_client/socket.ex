@@ -48,6 +48,11 @@ defmodule PhoenixClient.Socket do
     GenServer.call(pid, {:channel_leave, channel, topic})
   end
 
+  @doc false
+  def associate_topic_to_channel(pid, channel, topic) do
+    GenServer.call(pid, {:associate_topic_to_channel, channel, topic})
+  end
+
   ## Callbacks
   @impl true
   def init(opts) do
@@ -98,6 +103,7 @@ defmodule PhoenixClient.Socket do
        json_library: json_library,
        params: params,
        channels: %{},
+       topics: %{},
        reconnect: reconnect?,
        heartbeat_interval: heartbeat_interval,
        reconnect_interval: reconnect_interval,
@@ -138,17 +144,45 @@ defmodule PhoenixClient.Socket do
   end
 
   @impl true
-  def handle_call({:channel_leave, _channel, topic}, _from, %{channels: channels} = state) do
+  def handle_call(
+        {:associate_topic_to_channel, channel_pid, topic},
+        _from,
+        %{topics: topics, channels: channels} = state
+      ) do
+    channels
+    |> Map.values()
+    |> Enum.any?(&(&1 == channel_pid))
+    |> case do
+      true ->
+        {:reply, :ok, %{state | topics: Map.put(topics, topic, channel_pid)}}
+
+      _ ->
+        {:reply, {:error, :no_chanel_found}, state}
+    end
+  end
+
+  @impl true
+  def handle_call(
+        {:channel_leave, channel, topic},
+        _from,
+        %{channels: channels, topics: topics} = state
+      ) do
+    topics =
+      topics
+      |> Enum.filter(fn {_topic, channel_pid} -> channel_pid == channel end)
+      |> Map.new()
+
     case Map.get(channels, topic) do
       nil ->
-        {:reply, :error, state}
+        {:reply, :error, %{state | topics: topics}}
 
       {_channel_pid, monitor_ref} ->
         Process.demonitor(monitor_ref)
         message = Message.leave(topic)
         {push, state} = push_message(message, state)
         channels = Map.drop(channels, [topic])
-        {:reply, {:ok, push}, %{state | channels: channels}}
+
+        {:reply, {:ok, push}, %{state | channels: channels, topics: topics}}
     end
   end
 
@@ -253,15 +287,23 @@ defmodule PhoenixClient.Socket do
   end
 
   defp transport_receive(message, %{
+         topics: topics,
          channels: channels,
          serializer: serializer,
          json_library: json_library
        }) do
     decoded = Message.decode!(serializer, message, json_library)
+    channel_pid = Map.get(topics, decoded.topic)
 
-    case Map.get(channels, decoded.topic) do
-      nil -> :noop
-      {channel_pid, _} -> send(channel_pid, decoded)
+    cond do
+      is_pid(channel_pid) ->
+        send(channel_pid, decoded)
+
+      {channel_pid, _} = Map.get(channels, decoded.topic) ->
+        send(channel_pid, decoded)
+
+      true ->
+        :noop
     end
   end
 
